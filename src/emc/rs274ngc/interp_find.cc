@@ -719,9 +719,49 @@ int Interp::find_tool_index(setup_pointer settings, int toolno, int *index)
     }
 #endif //}
 
-    *index = tooldata_find_index_for_tool(toolno);
+    *index = -1;
 
-    CHKS((*index == -1), (_("Requested tool %d not found in the tool table")), toolno);
+    switch (settings->db_find_mode) {
+      case DB_FIRST:
+      case DB_ONLY:    *index = tooldata_db_find_index_for_tool(settings->db_find_mode,
+                                        settings->random_toolchanger,
+                                        toolno);
+                       if (*index != -1) {synch();return INTERP_OK;}
+                       break;
+      case DB_NOTUSED: break;
+      case DB_LAST:    break;
+    }
+
+    if (settings->db_find_mode != DB_ONLY) {
+        *index = tooldata_find_index_for_tool(toolno);
+        if (*index != -1) {return INTERP_OK;}
+    }
+
+    switch (settings->db_find_mode) {
+      case DB_FIRST:   break;
+      case DB_ONLY:    break;
+      case DB_NOTUSED: break;
+      case DB_LAST:
+                      *index = tooldata_db_find_index_for_tool(settings->db_find_mode,
+                                                settings->random_toolchanger,
+                                                toolno);
+                       if (*index != -1) {synch();return INTERP_OK;}
+                       break;
+    }
+
+    // CHKS for not found, identify search type in msg
+    switch (settings->db_find_mode) {
+      case DB_FIRST:
+      case DB_LAST:    CHKS((*index == -1),
+                       (_("Requested tool %d not found in the tool table or db")), toolno);
+                       break;
+      case DB_ONLY:    CHKS((*index == -1),
+                       (_("Requested tool %d not found in the tool db")), toolno);
+                       break;
+      case DB_NOTUSED: CHKS((*index == -1),
+                       (_("Requested tool %d not found in the tool table")), toolno);
+                       break;
+    }
     return INTERP_OK;
 }
 

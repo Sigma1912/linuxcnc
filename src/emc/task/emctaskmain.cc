@@ -3325,6 +3325,7 @@ int main(int argc, char *argv[])
 
 #ifdef TOOL_MMAP //{
     tool_mmap_user();
+    // initialize database tool finder:
 #else //}{
     tool_nml_register( (CANON_TOOL_TABLE*)&emcStatus->io.tool.toolTable,
                         &emcStatus->io.tool.last_idx);
@@ -3567,11 +3568,13 @@ int main(int argc, char *argv[])
         else if (deltaTime > maxTime)
             maxTime = deltaTime;
         startTime = endTime;
-        if (deltaTime > (latency_excursion_factor * emc_task_cycle_time)) {
-            if (num_latency_warnings < 10) {
-                rcs_print("task: main loop took %.6f seconds\n", deltaTime);
+        if (!getenv( (char*)"QUIET_TASK") ) {
+            if (deltaTime > (latency_excursion_factor * emc_task_cycle_time)) {
+                if (num_latency_warnings < 10) {
+                    rcs_print("task: main loop took %.6f seconds\n", deltaTime);
+                }
+                num_latency_warnings ++;
             }
-            num_latency_warnings ++;
         }
 
 	if ((emcTaskNoDelay) || (emcTaskEager)) {

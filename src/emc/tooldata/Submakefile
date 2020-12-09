@@ -4,6 +4,7 @@ ifdef TOOL_MMAP_FLAG
   CXXUSERSRCS += emc/tooldata/tooldata_mmap.cc
   CXXUSERSRCS += emc/tooldata/tool_mmap_read.cc
   TARGETS += ../bin/tool_mmap_read
+
 else
   $(info TOOLDATA using nml)
   LIBTOOLDATA_SRCS += emc/tooldata/tooldata_nml.cc
@@ -11,6 +12,9 @@ else
 endif
 CXXUSERSRCS += emc/tooldata/tooldata_common.cc
 LIBTOOLDATA_SRCS += emc/tooldata/tooldata_common.cc
+
+CXXUSERSRCS      += emc/tooldata/tooldata_db.cc
+LIBTOOLDATA_SRCS += emc/tooldata/tooldata_db.cc
 
 CXXUSERSRCS += emc/tooldata/tool_watch.cc
 INCLUDES += emc/tooldata

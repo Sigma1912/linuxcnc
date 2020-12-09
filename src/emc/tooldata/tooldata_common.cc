@@ -31,6 +31,7 @@ struct CANON_TOOL_TABLE tooldata_entry_init()
     tdata.frontangle = 0.0;
     tdata.backangle = 0.0;
     tdata.orientation = 0;
+    tdata.source = TOOL_FILE;
 
     return tdata;
 } // tooldata_entry_init()
@@ -38,12 +39,17 @@ struct CANON_TOOL_TABLE tooldata_entry_init()
 static bool is_random_toolchanger = 0;
 static int  nonrandom_idx = 0; // 'fakepocket' counter
 static bool initialized = 0;
+static tool_source_t the_tool_source;
 
-void tooldata_add_init(int nonrandom_start_idx,bool random_toolchanger)
+void tooldata_add_init(int nonrandom_start_idx,
+                       bool random_toolchanger,
+                       tool_source_t source)
 {
+    // initialize file-static vars need for tooldata_add_line()
     is_random_toolchanger = random_toolchanger ? 1 : 0;
-    nonrandom_idx = nonrandom_start_idx;
-    initialized   = 1;
+    nonrandom_idx   = nonrandom_start_idx;
+    initialized     = 1;
+    the_tool_source = source;
     return;
 } // tooldata_add_init()
 
@@ -177,6 +183,7 @@ int tooldata_add_entry(const char *input_line, char *ttcomments[])
         tdata.frontangle = frontangle;
         tdata.backangle = backangle;
         tdata.orientation = orientation;
+        tdata.source = the_tool_source;
         tooldata_put(tdata,idx);
         if (ttcomments && comment) {
              strcpy(ttcomments[idx], comment);
@@ -184,13 +191,18 @@ int tooldata_add_entry(const char *input_line, char *ttcomments[])
     } else {
          return -1;
     }
-    return 0;
+    return idx;
 } // tooldata_add_entry()
 
 void tooldata_save_line(FILE* fp,int idx,int random_toolchanger,char *ttcomments[])
 {
     CANON_TOOL_TABLE tdata;
     if (tooldata_get(&tdata,idx) != IDX_OK) {return;}
+    if (   tdata.source == TOOL_DB
+        && idx !=0 ) {
+        return;
+    }
+
     if (tdata.toolno != -1) {
         fprintf(fp, "T%d P%d", tdata.toolno,
                 random_toolchanger? idx : tdata.pocketno);
@@ -246,7 +258,7 @@ int loadToolTable(const char *filename,
     // which becomes available by tooldata_last_index_get()
 
     const int nonrandom_start_idx = 0; // when reading file start at 0
-    tooldata_add_init(nonrandom_start_idx,random_toolchanger);
+    tooldata_add_init(nonrandom_start_idx,random_toolchanger,TOOL_FILE);
 
     while (!feof(fp)) {
         // for nonrandom machines, just read the tools into pockets 1..n
@@ -259,7 +271,7 @@ int loadToolTable(const char *filename,
         strcpy(orig_line, input_line);
 
         // parse and store one line from tool table file
-        if (tooldata_add_entry(input_line, ttcomments)) {
+        if (tooldata_add_entry(input_line, ttcomments) <0) {
             printf("File: %s Unrecognized line skipped:\n    %s",filename, orig_line);
             continue;
         }

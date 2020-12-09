@@ -98,6 +98,7 @@ include an option for suppressing superfluous commands.
 #include "interp_internal.hh"	// interpreter private definitions
 #include "interp_queue.hh"
 #include "rs274ngc_interp.hh"
+#include "tooldata.hh"
 
 #include "units.h"
 
@@ -105,6 +106,8 @@ include an option for suppressing superfluous commands.
 
 #include <interp_parameter_def.hh>
 using namespace interp_param_global;
+
+static bool db_active =0;
 
 namespace bp = boost::python;
 
@@ -964,6 +967,43 @@ int Interp::init()
           logDebug("_setup.program_prefix:%s:", _setup.program_prefix);
 
 
+          char db_find_progname[LINELEN] = {0};
+          if(NULL != (inistring = inifile.Find("DB_FIND", "RS274NGC")))
+          {
+              rtapi_strxcpy(db_find_progname,inistring);
+db_active = 1;
+#if 0
+          extern int _task;
+          if (db_find_progname[0] && _task) {
+              tooldata_db_init(db_find_progname,_setup.random_toolchanger);
+          }
+#else
+static int inited=0;
+if (1 || !inited) {
+          tooldata_db_init(db_find_progname,_setup.random_toolchanger);
+          inited=1;
+  fprintf(stderr,"%5d Interp::init() inited=%d\n",getpid(),inited);
+  inited=1;
+} else {
+  fprintf(stderr,"%5d Interp::init()\n",getpid());
+}
+#endif
+
+          }
+          _setup.db_find_mode = DB_LAST; //default if not specified
+          if(NULL != (inistring = inifile.Find("DB_MODE", "RS274NGC")))
+          {
+              if (0==strncmp(inistring,"DB_NOTUSED",-1+sizeof("DB_NOTUSED"))) {
+                  _setup.db_find_mode = DB_NOTUSED;
+              }
+              if (0==strncmp(inistring,"DB_FIRST",-1+sizeof("DB_FIRST"))) {
+                  _setup.db_find_mode = DB_FIRST;
+              }
+              if (0==strncmp(inistring,"DB_ONLY",-1+sizeof("DB_ONLY"))) {
+                  _setup.db_find_mode = DB_ONLY;
+              }
+          }
+
           if(NULL != (inistring = inifile.Find("SUBROUTINE_PATH", "RS274NGC")))
           {
             // found it
@@ -1293,7 +1333,7 @@ int Interp::init()
       }
   }
   _setup.init_once = 0;
-  
+
   return INTERP_OK;
 }
 

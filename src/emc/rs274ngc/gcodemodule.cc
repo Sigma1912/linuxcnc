@@ -815,6 +815,13 @@ out_error:
         if(!PyErr_Occurred()) {
             PyErr_Format(PyExc_RuntimeError,
                     "interp_error > 0 but no Python exception set");
+        } else {
+            // seems a PyErr_Ocurred(), but no exception was set ?
+            // so return error info that can be caught and handled
+            PyErr_Format(PyExc_RuntimeError,"parse_file interp_error");
+            fprintf(stderr,"!!!%s: parse_file() f=%s\n"
+                    "!!!interp_error=%d result=%d last_sequence_number=%d\n",
+                    __FILE__,f,interp_error,result,last_sequence_number);
         }
         return NULL;
     }

@@ -1,0 +1,106 @@
+[[cha:tooldatabase]]
+
+= Tool Data
+
+Tool data is conventionally described by a tool table file specified
+in the inifile:
+
+----
+[EMCIO]
+TOOL_TABLE=tooltable_filename
+----
+
+The tool table file consists of a a line for each available tool that
+specifies its parameters.
+
+A database interface allows external programs to provide tool data
+information in addition to the data provided by the
+*tooltable_filename*.
+
+==  Tool Database Interface
+
+=== Ini file Settings
+
+Ini file settings control the (optional) operation of user-provided tool
+database programs:
+
+----
+[EMCIO]
+TOOL_TABLE = tooltable_filename
+...
+
+[RS274NGC]
+DB_FIND = db_find_program
+DB_MODE = db_find_mode
+----
+
+The *tooltable_filename* setting identifies a conventional file used
+to specify tool data.  For details, see the section:
+   gcode/tool-compensation.html#sec:tool-table
+
+The optional *db_find_program* specifies the path to a user-provided
+executable program that provides tool data when requested during
+LinuxCNC operation.
+
+The optional *db_find_mode* specifies how the database
+is used to identify tools:
+
+. *DB_NOTUSED*  Database not used (equivalent to omitting [RS274NGC]DB_FIND)
+. *DB_FIRST*    Try *db_find_program* first, then *tooltable_filename*
+. *DB_LAST*     Try *tooltable_filename* first, then *db_find_program*
+. *DB_ONLY*     Use *db_find_program* only
+
+If not specified, the default mode is *DB_LAST*
+
+=== *db_find_program* operation
+
+When a *db_find_progam* is specified, operation is as follows:
+
+. At startup, LinuxCNC starts the *db_find_program* and
+provides a version identifier as the sole argv parameter.
+
+. The *db_find_program* must respond by writing a single line
+acknowledgement to its stdout.  Typically, this line should
+include text including the token "ACK" with addtional
+identifying information.
+
+. The *db_find_program* then enters an event wait loop to
+receive subsequent tool requests.
+
+. LinuxCNC requests tool data by writing to the *db_find_program*
+stdin.  The request consists of a single line containing
+an integer tool number.
+
+. The *db_find_program* must respond with a valid tool data line
+conforming to the same format used for a *tooltable_filename*.  If no
+tool corresponding to the requested number is available, the
+*db_find_program* must respond with a non-valid tool data line --
+preferably including "NAK" and explanatory information.
+
+. After responding to a tool request, the *db_find_program*
+should resume its event wait for subsequent requests.
+
+=== Example program
+
+An example *db_find_program* (implemented as a python script) is provided
+with the simulation examples.  The program does *not* implement a
+database but illustrates the required operations to 1) acknowledge
+startup, 2) receive tool requests, and 3) issue replies.
+
+==== Simulation configs
+
+configs/sim/axis/db_find/
+
+=== Notes
+
+When using a *tooltable_filename*, the specified file is updated when
+the tool-in-spindle is changed by gcode commands (TnM6 for example).
+
+When tools are specified with a *db_find_program*, a specifed
+*tooltable_filename* is *not* updated except when an entry describes
+the spindle (pocket 0).  This is required to allow machines using a
+random toolchanger (as specified by [EMCIO]RANDOM_TOOLCHANGER=1) to
+identify the tool-in-spindle at startup.  If an inifile does not
+specify an [EMCIO]TOOL_TABLE=*tooltable_filename*, a file named tool.tbl
+is created to accomodate the startup tool necessity.
+

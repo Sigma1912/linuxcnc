@@ -25,6 +25,11 @@
 #define CANON_POCKETS_MAX 1001	// max size of carousel handled
 #define CANON_TOOL_ENTRY_LEN 256	// how long each file line can be
 
+typedef enum {
+    TOOL_FILE=0,
+    TOOL_DB,
+} tool_source_t;
+
 struct CANON_TOOL_TABLE {
     int toolno;
     int pocketno;
@@ -33,6 +38,7 @@ struct CANON_TOOL_TABLE {
     double frontangle;
     double backangle;
     int orientation;
+    tool_source_t source;
 };
 
 #endif

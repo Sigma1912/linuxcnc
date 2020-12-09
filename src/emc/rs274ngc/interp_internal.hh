@@ -28,6 +28,7 @@
 #include "interp_parameter_def.hh"
 #include "interp_fwd.hh"
 #include "interp_base.hh"
+#include "tooldata.hh"
 
 
 #define _(s) gettext(s)
@@ -823,6 +824,8 @@ struct setup
     remap_map remaps;
 #define INIT_FUNC  "__init__"
 #define DELETE_FUNC  "__delete__"
+
+    toolfind_t db_find_mode;
 
     // task calls upon interp.init() repeatedly
     // protect init() operations which are not idempotent

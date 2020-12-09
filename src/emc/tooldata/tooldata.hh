@@ -31,6 +31,13 @@ typedef enum {
     IDX_UNUSED,
     IDX_INVALID,
 } toolidx_t;
+
+typedef enum {
+    DB_NOTUSED=0,  // equivalent to not specifying in inifile
+    DB_LAST,
+    DB_FIRST,
+    DB_ONLY,
+} toolfind_t;
 //----------------------------------------------------------
 // tooldata_*(): access to internal tool table data:
 struct    CANON_TOOL_TABLE tooldata_entry_init(void);
@@ -41,7 +48,9 @@ void   tooldata_last_index_set(int idx);
 int    tooldata_last_index_get(void);
 int    tooldata_find_index_for_tool(int toolno);
 
-void   tooldata_add_init(int nonrandom_start_idx,bool random_toolchanger);
+void   tooldata_add_init(int nonrandom_start_idx,
+                         bool random_toolchanger,
+                         tool_source_t tool_from);
 int    tooldata_add_entry(const char *input_line,char *ttcomments[]);
 
 void tooldata_save_line(FILE* fp,
@@ -79,6 +88,14 @@ void tool_mmap_close(void);
 //nml specific
 int tool_nml_register(CANON_TOOL_TABLE *tblptr,int* last_idx_ptr);
 
+//----------------------------------------------------------
+// db_find
+
+int   tooldata_db_init(char db_find_progname[],int random_toolchanger);
+bool  tooldata_db_active(void);
+int   tooldata_db_find_index_for_tool(toolfind_t findmode,
+                                      int random_toolchanger,
+                                      int toolno);
 #ifdef CPLUSPLUS
 }
 #endif
