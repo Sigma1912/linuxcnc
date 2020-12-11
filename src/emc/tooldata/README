@@ -1,0 +1,14 @@
+Notes:
+
+ 1) new directory: emc/tooldata
+    api:           emc/tooldata/tooldata.hh
+
+ 2) removed unused directories/files from branch:
+       emc/toolstore
+       emc/task/iotaskintf.cc
+       emc/iotask/ioControl.cc (can be restored if users exist)
+       emc/ini/initool.h
+       emc/rs274ngc/tool_parse.*
+
+ 3) emccanon removed GET_EXTERNAL_POCKETS_MAX
+             (was superseded by CANON_POCKETS_MAX)
