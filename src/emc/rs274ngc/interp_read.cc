@@ -1209,6 +1209,17 @@ int Interp::read_one_item(
   CHKS((function_pointer == 0),
 	(!isprint(letter) || isspace(letter)) ?
 	    _("Bad character '\\%03o' used") : _("Bad character '%c' used"), letter);
+  if (_setup.disable_axes[0]) {
+	  char *disable_axes;
+	  disable_axes = _setup.disable_axes;
+	  std::string axes = "xyzabcuvw";
+	  if (axes.find(letter) != std::string::npos) {
+		  for (size_t n = 0; n < 9; n++) {
+			CHKS(((char)tolower(disable_axes[n]) == letter),
+				_("Interpreter: Axis '%c' disabled"), letter);
+		  }
+	  }
+  }
   CHP((*this.*function_pointer)(line, counter, block, parameters)); /* Call the function */ 
   return INTERP_OK;
 }

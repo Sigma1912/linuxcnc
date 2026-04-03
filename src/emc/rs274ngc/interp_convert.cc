@@ -2062,6 +2062,7 @@ int Interp::convert_comment(char *comment, bool enqueue)       //!< string with 
   char PYRUN_STR[] = "pyrun,";
   char PYRELOAD_STR[] = "pyreload";
   char ABORT_STR[] = "abort,";
+  char DISABLE_STR[] = "disable,";
   int m, n, start;
 
   // step over leading white space in comment
@@ -2134,6 +2135,12 @@ int Interp::convert_comment(char *comment, bool enqueue)       //!< string with 
                             EX_SIZE);
       setSavedError(expanded); // avoid printf interpretation
       return INTERP_ERROR;
+  }
+  else if (startswith(lc, DISABLE_STR))
+  {
+	  rtapi_strlcpy(_setup.disable_axes, (comment + start + strlen(DISABLE_STR)),EMCMOT_MAX_AXIS);
+      _setup.disable_axes[EMCMOT_MAX_AXIS] = 0; // terminator
+	  return INTERP_OK;
   }
   else if (streq(lc, LOGCLOSE_STR))
   {
