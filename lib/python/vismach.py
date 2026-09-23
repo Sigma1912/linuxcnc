@@ -23,13 +23,115 @@ from OpenGL.GLU import *
 from math import *
 import glnav
 import hal
+import linuxcnc
+import os
+s = linuxcnc.stat()
 
-class Collection(object):
-    def __init__(self, parts):
+old_plotclear = False
+
+# Checks the prefix passed to a 'Hal...' class and sets the instance prefix
+# The prefix is used to access hal pins or status attributes
+def check_prefix(self, prefix):
+    checked_prefix = None
+    if isinstance(prefix, type(hal)) or isinstance(prefix, linuxcnc.stat):
+        # hal instance or status channel instance  passed
+        checked_prefix = prefix
+    elif isinstance(prefix, hal.component):
+        # component instance passed, get the actual prefix from the API
+        checked_prefix = prefix.getprefix()
+    elif isinstance(prefix, str):
+        # check if the passed string is a hal component prefix
+        if hal.component_is_ready(prefix): # component prefix passed
+            checked_prefix = prefix
+    return checked_prefix
+
+def get_pin_or_attribute_value(self, prefix, val):
+    try:
+        if isinstance(prefix, type(hal)):
+            return hal.get_value(val)
+        elif isinstance(prefix, linuxcnc.stat):
+            s.poll()
+            return eval('s.'+ val)
+        elif isinstance(val, str) and hal.component_is_ready(prefix):
+            return hal.get_value(prefix + '.' + val)
+    except Exception as e:
+        print("Vismach Error: Cannot get pin or attribute value %s,\n Error: %s"  % (val ,e))
+        sys.exit()
+
+
+# Responsible for parsing and serving arguments (values, pins/attributes, expressions)
+class ArgsBase(object):
+    def __init__(self, *args):
+        if not hasattr(self, 'prefix'):
+            self.prefix = None
+        self._args = args
+
+    def _parse_expression(self, expr):
+        if '{' not in expr:
+            # Not an expression so we can try to get the value right away
+            value = get_pin_or_attribute_value(self, self.prefix, expr)
+            return value
+        else:
+            # an expression needs to be parsed
+            try:
+                # Split the expression string and extract parts between curly brackets
+                parts = expr.split("{")
+                res = [p.split("}")[0] for p in parts if "}" in p]
+                vals = []
+                for r in res:
+                    value = get_pin_or_attribute_value(self, self.prefix, r)
+                    vals.append(str(value))
+                # insert the values into the expression string
+                for i in range(len(res)):
+                    expr = expr.replace(('{'+res[i])+'}', vals[i])
+                return eval(expr)
+            except Exception as e:
+                print("Vismach Error: Cannot evaluate expression %s,\n  Error: %s" % (expr ,e))
+                sys.exit()
+
+    def _get_value(self, v):
+        if isinstance(v, str):
+            if os.path.isdir(v):
+                # filename from 'HalAsciiOBJ()' or 'HalAsciiSTL'
+                return v
+            elif self.prefix is not None:
+                # we got some string that either IS or contains halpin(s) or status attributes
+                return self._parse_expression(v)
+            else:
+                print("Vismach Error: No prefix passed but string argument %s is not a path." % (v))
+                sys.exit()
+        else:
+            # no string argument passed so we so we just pass on the value what we got
+            return v
+
+    # this serves the current value for each stored argument
+    def coords(self):
+        if len(self._args) == 1:
+            return list(map(self._get_value, self._args))[0]
+        return list(map(self._get_value, self._args))
+
+
+########################
+#   Parts Collector    #
+########################
+
+class Collection(ArgsBase):
+    def __init__(self, parts, *args):
+        # check parts
+        if parts is None:
+            raise TypeError("Vismach Error: Must have at least one part.")
+        if not isinstance(parts, list):
+            parts = [parts]
         self.parts = parts
-        self.vol = 0
+        for part in parts:
+            if not hasattr(part, 'coords') and not hasattr(part, 'capture') and not hasattr(part, 'draw'):
+                raise TypeError("Vismach Error: '%s' is not a valid part" % (part))
+        self.parts = parts
+        ArgsBase.__init__(self, *args)
 
     def traverse(self):
+        if not isinstance(self.parts, list):
+            self.parts = [self.parts]
         for p in self.parts:
             if hasattr(p, "apply"):
                 p.apply()
@@ -56,6 +158,11 @@ class Collection(object):
     def set_volume(self,vol):
         self.vol = vol;
 
+
+##########################
+#   Part Manipulators    #
+##########################
+
 class Translate(Collection):
     def __init__(self, parts, x, y, z):
         self.parts = parts
@@ -80,17 +187,14 @@ class Scale(Collection):
     def unapply(self):
         glPopMatrix()
 
-class HalTranslate(Collection):
-    def __init__(self, parts, comp, var, x, y, z):
+class HalTranslate(Collection, ArgsBase):
+    def __init__(self, parts, prefix, var, x, y, z):
         self.parts = parts
-        self.where = x, y, z
-        self.comp = comp
-        self.var = var
+        self.prefix = check_prefix(self, prefix)
+        ArgsBase.__init__(self, var, x, y, z)
 
     def apply(self):
-        x, y, z = self.where
-        v = self.comp[self.var]
-        
+        v, x, y, z = self.coords()
         glPushMatrix()
         glTranslatef(x*v, y*v, z*v)
 
@@ -98,17 +202,16 @@ class HalTranslate(Collection):
         glPopMatrix()
 
 
-class HalRotate(Collection):
-    def __init__(self, parts, comp, var, th, x, y, z):
+class HalRotate(Collection, ArgsBase):
+    def __init__(self, parts, prefix, var, th, x, y, z):
         self.parts = parts
-        self.where = th, x, y, z
-        self.comp = comp
-        self.var = var
+        self.prefix = check_prefix(self, prefix)
+        ArgsBase.__init__(self, var, th, x, y, z)
 
     def apply(self):
-        th, x, y, z = self.where
+        v, th, x, y, z = self.coords()
         glPushMatrix()
-        glRotatef(th * self.comp[self.var], x, y, z)
+        glRotatef(th * v, x, y, z)
 
     def unapply(self):
         glPopMatrix()
@@ -128,34 +231,13 @@ class Rotate(Collection):
         glPopMatrix()
 
 
-class HalRotateEuler(Collection):
-    def __init__(self, parts, comp, th1, th2, th3, order=123):
+class HalRotateEuler(Collection, ArgsBase):
+    def __init__(self, parts, prefix, th1, th2, th3, order=123):
         self.parts = parts
-        self.comp = comp
-        self.order = order
-        self.th1 = th1
-        self.th2 = th2
-        self.th3 = th3
+        ArgsBase.__init__(self, prefix, th1, th2, th3, order)
 
     def apply(self):
-        # check whether pins or values have been passed
-        if isinstance(self.order, str):
-            order = int(self.comp[self.order])
-        else:
-            order = self.order
-        if isinstance(self.th1, str):
-            th1 = self.comp[self.th1]
-        else:
-            th1 = self.th1
-        if isinstance(self.th2, str):
-            th2 = self.comp[self.th2]
-        else:
-            th2 = self.th2
-        if isinstance(self.th3, str):
-            th3 = self.comp[self.th3]
-        else:
-            th3 = self.th3
-
+        th1, th2, th3, order = self.coords()
         glPushMatrix()
         if order == 131:
             glRotatef(th1, 1, 0, 0)
@@ -211,7 +293,7 @@ class HalRotateEuler(Collection):
 
 
 class Track(Collection):
-    '''move and rotate an object to point from one capture()'d 
+    '''move and rotate an object to point from one capture()'d
         coordinate system to another.
         we need "world" to convert coordinates from GL_MODELVIEW coordinates
         to our coordinate system'''
@@ -262,16 +344,17 @@ class Track(Collection):
                 glPopMatrix()
 
 # scales an object by the value of a halpin
-class HalScale(Collection):
-    def __init__(self, parts, comp, x, y, z, var):
+class HalScale(Collection, ArgsBase):
+    def __init__(self, parts, prefix, x, y, z, var):
         self.parts = parts
-        self.comp = comp
-        self.var = var
-        self.xyz = x, y, z
+        self.prefix = check_prefix(self, prefix)
+        ArgsBase.__init__(self, x, y, z, var)
 
     def apply(self):
-        x, y, z = self.xyz
-        factor = self.comp[self.var]
+        th1, th2, th3, order = self.coords()
+
+    def apply(self):
+        factor, x, y, z = self.coords()
         glPushMatrix()
         glScalef(x*factor,y*factor,z*factor)
 
@@ -281,23 +364,20 @@ class HalScale(Collection):
 
 # shows an object if const=var and hides it otherwise, behavior can be changed
 # using the optional arguments for scalefactors when true or false
-class HalShow(Collection):
-    def __init__(self, parts, comp, const, var, scaleby_true=1, scaleby_false=0):
+class HalShow(Collection, ArgsBase):
+    def __init__(self, parts, prefix, const, var, scaleby_true=1, scaleby_false=0):
         self.parts = parts
-        self.comp = comp
-        self.const = const
-        self.var = var
-        self.scaleby_true = scaleby_true
-        self.scaleby_false = scaleby_false
+        self.prefix = check_prefix(self, prefix)
+        ArgsBase.__init__(self, const, var, scaleby_true, scaleby_false)
 
     def apply(self):
-        s_t = self.scaleby_true
-        s_f = self.scaleby_false
+        args = self.coords()
+        const, var, s_t, s_f = args
         glPushMatrix()
-        if self.const == self.comp[self.var]:
-            glScalef(s_t,s_t,s_t)
+        if const == var:
+            glScalef(s_t, s_t, s_t)
         else:
-            glScalef(s_f,s_f,s_f)
+            glScalef(s_f, s_f, s_f)
 
     def unapply(self):
         glPopMatrix()
@@ -305,21 +385,14 @@ class HalShow(Collection):
 
 # translates an object using a variable translation vector
 # use scale=-1 to change direction
-class HalVectorTranslate(Collection):
-    def __init__(self, parts, comp, xvar, yvar, zvar, scale=1):
+class HalVectorTranslate(Collection, ArgsBase):
+    def __init__(self, parts, prefix, xvar, yvar, zvar, scale=1):
         self.parts = parts
-        self.comp = comp
-        self.xvar = xvar
-        self.yvar = yvar
-        self.zvar = zvar
-        self.sc   = scale
+        self.prefix = check_prefix(self, prefix)
+        ArgsBase.__init__(self, xvar, yvar, zvar, scale)
 
     def apply(self):
-        # check for zero vector components
-        xvar = 0 if self.xvar == 0 else self.comp[self.xvar]
-        yvar = 0 if self.yvar == 0 else self.comp[self.yvar]
-        zvar = 0 if self.zvar == 0 else self.comp[self.zvar]
-        sc = self.sc
+        xvar, yvar, zvar, sc = self.coords()
         glPushMatrix()
         glTranslatef(sc*xvar, sc*yvar, sc*zvar)
 
@@ -327,98 +400,93 @@ class HalVectorTranslate(Collection):
         glPopMatrix()
 
 
-class HalVectorRotate(Collection):
-    def __init__(self, parts, comp, var, th, x, y, z):
+class HalVectorRotate(Collection, ArgsBase):
+    def __init__(self, parts, prefix, var, th, x, y, z):
         self.parts = parts
-        self.comp = comp
-        self.var = var
-        self.values = th, x, y, z
-
-    def get_values(self):
-        return self.values
+        self.prefix = check_prefix(self, prefix)
+        ArgsBase.__init__(self, xvar, yvar, zvar, scale)
 
     def apply(self):
-        th, x, y, z = self.get_values()
+        var, th, x, y, z = self.coords()
         glPushMatrix()
-        glRotatef(th * self.comp[self.var], x, y, z)
+        glRotatef(th * var, x, y, z)
 
     def unapply(self):
         glPopMatrix()
 
 
-class CoordsBase(object):
-    def __init__(self, *args):
-        if args and isinstance(args[0], hal.component):
-           self.comp = args[0]
-           args = args[1:]
+######################
+#   Part Creators    #
+######################
+
+class Color(Collection, ArgsBase):
+    def __init__(self, arg1, arg2, glow=0):
+        if not isinstance(arg1, list):
+            arg1=[arg1]
+        # legacy atribute order was (self, color, parts)
+        if all(isinstance(item, (int, float)) for item in arg1):
+            self.parts = arg2
+            ArgsBase.__init__(self, arg1, glow)
         else:
-           self.comp = None
-        self._coords = args
-        self.q = gluNewQuadric()
+            self.parts = arg1
+            ArgsBase.__init__(self, arg2, glow)
 
-    def coords(self):
-        return list(map(self._coord, self._coords))
+    def apply(self):
+        color, glow = self.coords()
+        glPushAttrib(GL_LIGHTING_BIT)
+        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, color)
+        if glow==1:
+            glMaterialfv(GL_FRONT, GL_EMISSION, [1,1,0,1])
+        else:
+            glMaterialfv(GL_FRONT, GL_EMISSION, [0,0,0,1])
 
-    def _coord(self, v):
-        if isinstance(v, str): return self.comp[v]
-        return v
+    def unapply(self):
+        glPopAttrib()
+
+class HalColor(Color):
+    def __init__(self, prefix, parts, color, glow=0):
+        self.prefix = check_prefix(self, prefix)
+        Color.__init__(self, parts, color, glow)
 
 
-# draw an open cylinder from point_1 to point_2, radius is optional (defaults to 5)
-class HalLine():
-    def __init__(self, comp, x1var, y1var, z1var, x2var, y2var, z2var, stretch, r=5):
-        self.comp = comp
-        self.x1var = x1var
-        self.y1var = y1var
-        self.z1var = z1var
-        self.x2var = x2var
-        self.y2var = y2var
-        self.z2var = z2var
-        self.stretch = stretch
-        self.r = r
-        self.q = gluNewQuadric()
+# Draw an open cylinder from point_1 to point_2,# stretchfactor and radius are optional
+class Line(ArgsBase):
+    def __init__(self, x_start, y_start, z_start, x_end, y_end, z_end, stretch=1, r=5):
+        ArgsBase.__init__(self, x_start, y_start, z_start, x_end, y_end, z_end, stretch, r)
 
     def cross(self, a, b):
         return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
 
     # calculate polar coordinates in degrees
     # a rotates around the x-axis; b rotates around the y axis
-    def polar(self, v):
-        length = sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]) * self.stretch
+    def polar(self, v, s):
+        length = sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]) * s
         axis = (1, 0, 0) if hypot(v[0], v[1]) < 0.001 else self.cross(v, (0, 0, 1))
         angle = -atan2(hypot(v[0], v[1]), v[2])*180/pi
         return (length, angle, axis)
 
     def draw(self):
-        x1 = 0 if self.x1var == 0 else self.comp[self.x1var]
-        y1 = 0 if self.y1var == 0 else self.comp[self.y1var]
-        z1 = 0 if self.z1var == 0 else self.comp[self.z1var]
-        x2 = 0 if self.x2var == 0 else self.comp[self.x2var]
-        y2 = 0 if self.y2var == 0 else self.comp[self.y2var]
-        z2 = 0 if self.z2var == 0 else self.comp[self.z2var]
-        r = self.r
+        x1, y1, z1, x2, y2, z2, s, r = self.coords()
         v = [x2,y2,z2]
-        length, angle, axis = self.polar(v)
+        length, angle, axis = self.polar(v, s)
         glPushMatrix()
         glTranslate(x1, y1, z1)
         glRotate(angle,*axis)
-        gluCylinder(self.q, r, r, length, 32, 1)
+        gluCylinder(gluNewQuadric(), r, r, length, 32, 1)
 
     def unapply(self):
         glPopMatrix()
 
+class HalLine(Line):
+    def __init__(self, prefix, x_start, y_start, z_start, x_end, y_end, z_end, stretch=1, r=5):
+        self.prefix = check_prefix(self, prefix)
+        Line.__init__(self, x_start, y_start, z_start, x_end, y_end, z_end, stretch, r)
+
+
 # draw a plane defined by it's normal vector(vx,vy,vz) origin at (x,y,z)
-class HalPlaneFromNormal():
-    def __init__(self, comp,  x, y, z, vx, vy, vz, s=500):
-        self.comp = comp
-        self.x = x
-        self.y = y
-        self.z = z
-        self.vx = vx
-        self.vy = vy
-        self.vz = vz
-        self.s = s
-        self.q = gluNewQuadric()
+class PlaneFromNormal(ArgsBase):
+    def __init__(self, x_orig, y_orig, z_orig, x_vec, y_vec, z_vec, quadrant_size=500):
+        ArgsBase.__init__(self, x_orig, y_orig, z_orig, x_vec, y_vec, z_vec, quadrant_size)
 
     def cross(self, a, b):
         return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
@@ -441,14 +509,7 @@ class HalPlaneFromNormal():
         glEnd()
 
     def draw(self):
-        # check for zero values in the arguments
-        x = 0 if self.x == 0 else self.comp[self.x]
-        y = 0 if self.y == 0 else self.comp[self.y]
-        z = 0 if self.z == 0 else self.comp[self.z]
-        vx = 0 if self.vx == 0 else self.comp[self.vx]
-        vy = 0 if self.vy == 0 else self.comp[self.vy]
-        vz = 0 if self.vz == 0 else self.comp[self.vz]
-        s = self.s
+        x, y, z, vx, vy, vz, s = self.coords()
         v = [vx, vy, vz]
         length, angle, axis = self.polar(v)
         glPushMatrix()
@@ -459,45 +520,27 @@ class HalPlaneFromNormal():
     def unapply(self):
         glPopMatrix()
 
+class HalPlaneFromNormal(PlaneFromNormal):
+    def __init__(self, prefix,  x, y, z, vx, vy, vz, s=500):
+        self.prefix = check_prefix(self, prefix)
+        PlaneFromNormal.__init__(self,  x, y, z, vx, vy, vz, s)
+
 
 # draw a coordinate system defined by it's normal vector(zx,zy,zz) and x-direction vector(xx, xy, xz)
 # optional r to define the thickness of the cylinders
-class HalCoordsFromNormalAndDirection():
-    def __init__(self, comp, ox, oy, oz, xx, xy, xz, zx, zy, zz, stretch, r=5):
-        self.comp = comp
-        self.ox = ox
-        self.oy = oy
-        self.oz = oz
-        self.xx = xx
-        self.xy = xy
-        self.xz = xz
-        self.zx = zx
-        self.zy = zy
-        self.zz = zz
-        self.stretch = stretch
-        self.r = r
-        self.q = gluNewQuadric()
+class CoordsFromNormalAndDirection(ArgsBase):
+    def __init__(self, x_orig, y_orig, z_orig, vec_Xx, vec_Xy, vec_Xz, vec_Zx, vec_Zy, vec_Zz, stretchfactor=1, radius=5):
+        ArgsBase.__init__(self, x_orig, y_orig, z_orig, vec_Xx, vec_Xy, vec_Xz, vec_Zx, vec_Zy, vec_Zz, stretchfactor, radius)
 
-
-    def draw_vector(self, color):
-        gluCylinder(self.q, self.r, self.r, 50*self.stretch, 32, 1)
+    def draw_vector(self, r, stretch, color):
+        gluCylinder(gluNewQuadric(), r, r, 50 * stretch, 32, 1)
         glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, color)
 
     def cross(self, a, b):
         return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
 
     def draw(self):
-        # check for zero values in the arguments
-        ox = 0 if self.ox == 0 else self.comp[self.ox]
-        oy = 0 if self.oy == 0 else self.comp[self.oy]
-        oz = 0 if self.oz == 0 else self.comp[self.oz]
-        xx = 0 if self.xx == 0 else self.comp[self.xx]
-        xy = 0 if self.xy == 0 else self.comp[self.xy]
-        xz = 0 if self.xz == 0 else self.comp[self.xz]
-        zx = 0 if self.zx == 0 else self.comp[self.zx]
-        zy = 0 if self.zy == 0 else self.comp[self.zy]
-        zz = 0 if self.zz == 0 else self.comp[self.zz]
-        r = self.r
+        ox, oy, oz, xx, xy, xz, zx, zy, zz, stretch, r = self.coords()
         vo = [ox, oy, oz]
         vx = [xx, xy, xz]
         vz = [zx, zy, zz]
@@ -508,35 +551,28 @@ class HalCoordsFromNormalAndDirection():
              [ yx, yy, yz, 0],
              [ zx, zy, zz, 0],
              [ ox, oy, oz, 1]]
-
         glPushMatrix()
         glMultMatrixf(m_t)
-        self.draw_vector([1,0,0,1])
+        self.draw_vector(r, stretch, [1,0,0,1])
         glRotate(90,0,1,0)
-        self.draw_vector([0,1,0,1])
+        self.draw_vector(r, stretch, [0,1,0,1])
         glRotate(-90,1,0,0)
-        self.draw_vector([0,0,1,1])
+        self.draw_vector(r, stretch, [0,0,1,1])
 
     def unapply(self):
         glPopMatrix()
 
+class HalCoordsFromNormalAndDirection(CoordsFromNormalAndDirection):
+    def __init__(self, prefix, ox, oy, oz, xx, xy, xz, zx, zy, zz, stretch=1, r=5):
+        self.prefix = check_prefix(self, prefix)
+        CoordsFromNormalAndDirection.__init__(self, ox, oy, oz, xx, xy, xz, zx, zy, zz, stretch, r)
+
 
 # draw a grid defined by it's normal vector(zx,zy,zz) and x-direction vector(xx, xy, xz)
 # optional s to define the half-width from the origin (ox,oy,oz)
-class HalGridFromNormalAndDirection():
-    def __init__(self, comp, ox, oy, oz, xx, xy, xz, zx, zy, zz, s=500):
-        self.comp = comp
-        self.ox = ox
-        self.oy = oy
-        self.oz = oz
-        self.xx = xx
-        self.xy = xy
-        self.xz = xz
-        self.zx = zx
-        self.zy = zy
-        self.zz = zz
-        self.s = s
-        self.q = gluNewQuadric()
+class GridFromNormalAndDirection(ArgsBase):
+    def __init__(self, x_orig, y_orig, z_orig, vec_Xx, vec_Xy, vec_Xz, vec_Zx, vec_Zy, vec_Zz, quadrant_size=500):
+        ArgsBase.__init__(self, x_orig, y_orig, z_orig, vec_Xx, vec_Xy, vec_Xz, vec_Zx, vec_Zy, vec_Zz, quadrant_size)
 
     def square(self, s):
         glBegin(GL_LINES);
@@ -553,17 +589,7 @@ class HalGridFromNormalAndDirection():
         return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
 
     def draw(self):
-        # check for zero values in the arguments
-        ox = 0 if self.ox == 0 else self.comp[self.ox]
-        oy = 0 if self.oy == 0 else self.comp[self.oy]
-        oz = 0 if self.oz == 0 else self.comp[self.oz]
-        xx = 0 if self.xx == 0 else self.comp[self.xx]
-        xy = 0 if self.xy == 0 else self.comp[self.xy]
-        xz = 0 if self.xz == 0 else self.comp[self.xz]
-        zx = 0 if self.zx == 0 else self.comp[self.zx]
-        zy = 0 if self.zy == 0 else self.comp[self.zy]
-        zz = 0 if self.zz == 0 else self.comp[self.zz]
-        s = self.s
+        ox, oy, oz, xx, xy, xz, zx, zy, zz, s = self.coords()
         vo = [ox, oy, oz]
         vx = [xx, xy, xz]
         vz = [zx, zy, zz]
@@ -574,7 +600,6 @@ class HalGridFromNormalAndDirection():
              [ yx, yy, yz, 0],
              [ zx, zy, zz, 0],
              [ ox, oy, oz, 1]]
-
         glPushMatrix()
         glMultMatrixf(m_t)
         self.square(s)
@@ -582,18 +607,16 @@ class HalGridFromNormalAndDirection():
     def unapply(self):
         glPopMatrix()
 
+class HalGridFromNormalAndDirection(GridFromNormalAndDirection):
+    def __init__(self, prefix, ox, oy, oz, xx, xy, xz, zx, zy, zz, s=500):
+        self.prefix = check_prefix(self, prefix)
+        GridFromNormalAndDirection.__init__(self, ox, oy, oz, xx, xy, xz, zx, zy, zz, s)
+
+
 # draw a grid defined by it's normal vector(vx,vy,vz) origin at (x,y,z)
-class HalGridFromNormal():
-    def __init__(self, comp,  x, y, z, vx, vy, vz, s=500):
-        self.comp = comp
-        self.x = x
-        self.y = y
-        self.z = z
-        self.vx = vx
-        self.vy = vy
-        self.vz = vz
-        self.s = s
-        self.q = gluNewQuadric()
+class GridFromNormal(ArgsBase):
+    def __init__(self, x_orig, y_orig, z_orig, x_vec, y_vec, z_vec, quadrant_size=500):
+        ArgsBase.__init__(self, x_orig, y_orig, z_orig, x_vec, y_vec, z_vec, quadrant_size)
 
     def cross(self, a, b):
         return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
@@ -618,14 +641,7 @@ class HalGridFromNormal():
         glEnd()
 
     def draw(self):
-        # check for zero values in the arguments
-        x = 0 if self.x == 0 else self.comp[self.x]
-        y = 0 if self.y == 0 else self.comp[self.y]
-        z = 0 if self.z == 0 else self.comp[self.z]
-        vx = 0 if self.vx == 0 else self.comp[self.vx]
-        vy = 0 if self.vy == 0 else self.comp[self.vy]
-        vz = 0 if self.vz == 0 else self.comp[self.vz]
-        s = self.s
+        x, y, z, vx, vy, vz, s = self.coords()
         v = [vx, vy, vz]
         length, angle, axis = self.polar(v)
         glPushMatrix()
@@ -636,12 +652,16 @@ class HalGridFromNormal():
     def unapply(self):
         glPopMatrix()
 
-# draw a grid defined by it's normal vector(vx,vy,vz) origin at (x,y,z)
-class HalGrid():
-    def __init__(self, comp, s=500):
-        self.comp = comp
-        self.s = s
-        self.q = gluNewQuadric()
+class HalGridFromNormal(GridFromNormal):
+    def __init__(self, prefix, ox, oy, oz, vx, vy, vz, s=500):
+        self.prefix = check_prefix(self, prefix)
+        GridFromNormal.__init__(self, prefix, ox, oy, oz, vx, vy, vz, s)
+
+
+# draw a grid
+class Grid(ArgsBase):
+    def __init__(self, quadrant_size=500):
+        ArgsBase.__init__(self, quadrant_size)
 
     def grid(self, s):
         glBegin(GL_LINES);
@@ -655,95 +675,19 @@ class HalGrid():
         glEnd()
 
     def draw(self):
-        s = self.s
+        s = self.coords()
         self.grid(s)
 
-
-# give endpoint X values and radii
-# resulting cylinder is on the X axis
-class CylinderX(CoordsBase):
-    def draw(self):
-        x1, r1, x2, r2 = self.coords()
-        if x1 > x2:
-            tmp = x1
-            x1 = x2
-            x2 = tmp
-            tmp = r1
-            r1 = r2
-            r2 = tmp
-        glPushMatrix()
-        # GL creates cylinders along Z, so need to rotate
-        z1 = x1
-        z2 = x2
-        glRotatef(90,0,1,0)
-        # need to translate the whole thing to z1
-        glTranslatef(0,0,z1)
-        # the cylinder starts out at Z=0
-        gluCylinder(self.q, r1, r2, z2-z1, 32, 1)
-        # bottom cap
-        glRotatef(180,1,0,0)
-        gluDisk(self.q, 0, r1, 32, 1)
-        glRotatef(180,1,0,0)
-        # the top cap needs flipped and translated
-        glPushMatrix()
-        glTranslatef(0,0,z2-z1)
-        gluDisk(self.q, 0, r2, 32, 1)
-        glPopMatrix()
-        glPopMatrix()
-
-    def volume(self):
-        x1, r1, x2, r2 = self.coords()
-        # actually a frustum of a cone
-        vol = 3.1415927/3.0 * abs(x1-x2)*(r1*r1+r1*r2+r2*r2)
-        #print "CylinderX.volume", vol
-        return vol
+class HalGrid(Grid):
+    def __init__(self, prefix, s=500):
+        self.prefix = check_prefix(self, prefix)
+        Grid.__init__(self, s)
 
 
-# give endpoint Y values and radii
-# resulting cylinder is on the Y axis
-class CylinderY(CoordsBase):
-    def __init__(self, y1, r1, y2, r2):
-        self._coords = y1, r1, y2, r2
-        self.q = gluNewQuadric()
+class CylinderZ(ArgsBase):
+    def __init__(self, z_start, r_start, z_end, r_end):
+        ArgsBase.__init__(self, z_start, r_start, z_end, r_end)
 
-    def draw(self):
-        y1, r1, y2, r2 = self.coords()
-        if y1 > y2:
-            tmp = y1
-            y1 = y2
-            y2 = tmp
-            tmp = r1
-            r1 = r2
-            r2 = tmp
-        glPushMatrix()
-        # GL creates cylinders along Z, so need to rotate
-        z1 = y1
-        z2 = y2
-        glRotatef(-90,1,0,0)
-        # need to translate the whole thing to z1
-        glTranslatef(0,0,z1)
-        # the cylinder starts out at Z=0
-        gluCylinder(self.q, r1, r2, z2-z1, 32, 1)
-        # bottom cap
-        glRotatef(180,1,0,0)
-        gluDisk(self.q, 0, r1, 32, 1)
-        glRotatef(180,1,0,0)
-        # the top cap needs flipped and translated
-        glPushMatrix()
-        glTranslatef(0,0,z2-z1)
-        gluDisk(self.q, 0, r2, 32, 1)
-        glPopMatrix()
-        glPopMatrix()
-
-    def volume(self):
-        y1, r1, y2, r2 = self.coords()
-        # actually a frustum of a cone
-        vol = 3.1415927/3.0 * abs(y1-y2)*(r1*r1+r1*r2+r2*r2)
-        #print "CylinderY.volume", vol
-        return vol
-
-
-class CylinderZ(CoordsBase):
     def draw(self):
         z1, r1, z2, r2 = self.coords()
         if z1 > z2:
@@ -755,17 +699,19 @@ class CylinderZ(CoordsBase):
             r2 = tmp
         # need to translate the whole thing to z1
         glPushMatrix()
+        if hasattr(self, 'orient'):
+            self.orient()
         glTranslatef(0,0,z1)
         # the cylinder starts out at Z=0
-        gluCylinder(self.q, r1, r2, z2-z1, 32, 1)
+        gluCylinder(gluNewQuadric(), r1, r2, z2-z1, 32, 1)
         # bottom cap
         glRotatef(180,1,0,0)
-        gluDisk(self.q, 0, r1, 32, 1)
+        gluDisk(gluNewQuadric(), 0, r1, 32, 1)
         glRotatef(180,1,0,0)
         # the top cap needs flipped and translated
         glPushMatrix()
         glTranslatef(0,0,z2-z1)
-        gluDisk(self.q, 0, r2, 32, 1)
+        gluDisk(gluNewQuadric(), 0, r2, 32, 1)
         glPopMatrix()
         glPopMatrix()
 
@@ -776,15 +722,56 @@ class CylinderZ(CoordsBase):
         #print "CylinderZ.volume", vol
         return vol
 
+class HalCylinderZ(CylinderZ):
+    def __init__(self, prefix, z_start, r_start, z_end, r_end):
+        self.prefix = check_prefix(self, prefix)
+        CylinderZ.__init__(self, z_start, r_start, z_end, r_end)
+
+
+# give endpoint Y values and radii
+# resulting cylinder is on the Y axis
+class CylinderY(CylinderZ):
+    def __init__(self, y_start, r_start, y_end, r_end):
+        ArgsBase.__init__(self, y_start, r_start, y_end, r_end)
+
+    def orient(self):
+        glRotatef(-90,1,0,0)
+
+
+class HalCylinderY(CylinderY):
+    def __init__(self, prefix, y_start, r_start, y_end, r_end):
+        self.prefix = check_prefix(self, prefix)
+        CylinderY.__init__(self, y_start, r_start, y_end, r_end)
+
+
+# give endpoint X values and radii
+# resulting cylinder is on the X axis
+class CylinderX(CylinderZ):
+    def __init__(self, x_start, r_start, x_end, r_end):
+        ArgsBase.__init__(self, x_start, r_start, x_end, r_end)
+
+    def orient(self):
+        glRotatef(90,0,1,0)
+
+
+class HalCylinderX(CylinderX):
+    def __init__(self, prefix, x_start, r_start, x_end, r_end):
+        self.prefix = check_prefix(self, prefix)
+        CylinderX.__init__(self, x_start, r_start, x_end, r_end)
+
+
 # give center and radius
-class Sphere(CoordsBase):
+class Sphere(ArgsBase):
+    def __init__(self, x_center, y_center, z_center, radius):
+        ArgsBase.__init__(self, x_center, y_center, z_center, radius)
+
     def draw(self):
         x, y, z, r = self.coords()
         # need to translate the whole thing to x,y,z
         glPushMatrix()
         glTranslatef(x,y,z)
         # the sphere starts out at the origin
-        gluSphere(self.q, r, 32, 16)
+        gluSphere(gluNewQuadric(), r, 32, 16)
         glPopMatrix()
 
     def volume(self):
@@ -793,10 +780,18 @@ class Sphere(CoordsBase):
         #print "Sphere.volume", vol
         return vol
 
+class HalSphere(Sphere):
+    def __init__(self, prefix, x_center, y_center, z_center, radius):
+        self.prefix = check_prefix(self, prefix)
+        Sphere.__init__(self, x_center, y_center, z_center, radius)
+
 
 # triangular plate in XY plane
 # specify the corners Z values for each side
-class TriangleXY(CoordsBase):
+class TriangleXY(ArgsBase):
+    def __init__(self, x1, y1, x2, y2, x3, y3, z1, z2):
+        ArgsBase.__init__(self, x1, y1, x2, y2, x3, y3, z1, z2)
+
     def draw(self):
         x1, y1, x2, y2, x3, y3, z1, z2 = self.coords()
         x12 = x1-x2
@@ -871,12 +866,17 @@ class TriangleXY(CoordsBase):
         #print "TriangleXY.volume = area * thickness)",vol, area, thk
         return vol
 
+class HalTriangleXY(TriangleXY):
+    def __init__(self,prefix, x1, y1, x2, y2, x3, y3, z1, z2):
+        self.prefix = check_prefix(self, prefix)
+        TriangleXY.__init__(self, x1, y1, x2, y2, x3, y3, z1, z2)
+
 # triangular plate in XZ plane
 class TriangleXZ(TriangleXY):
     def coords(self):
         x1, z1, x2, z2, x3, z3, y1, y2 = TriangleXY.coords(self)
         return x1, z1, x2, z2, x3, z3, -y1, -y2
-    
+
     def draw(self):
         glPushMatrix()
         glRotatef(90,1,0,0)
@@ -890,12 +890,17 @@ class TriangleXZ(TriangleXY):
         #print " TriangleXZ.volume",vol
         return vol
 
+class HalTriangleXZ(TriangleXZ):
+    def __init__(self, prefix, *args):
+        self.prefix = check_prefix(self, prefix)
+        TriangleXZ.__init__(args)
+
 # triangular plate in YZ plane
 class TriangleYZ(TriangleXY):
     def coords(self):
         y1, z1, y2, z2, y3, z3, x1, x2 = TriangleXY.coords(self)
         return z1, y1, z2, y2, z3, y3, -x1, -x2
-    
+
     def draw(self):
         glPushMatrix()
         glRotatef(90,0,-1,0)
@@ -909,8 +914,17 @@ class TriangleYZ(TriangleXY):
         #print " TriangleYZ.volume",vol
         return vol
 
+class HalTriangleYZ(TriangleYZ):
+    def __init__(self, prefix, *args):
+        self.prefix = check_prefix(self, prefix)
+        TriangleYZ.__init__(args)
 
-class ArcX(CoordsBase):
+
+# pipe segment along X, inner radius (r1), outer radius (r1), start angle (a1), end angle (a2)
+class ArcX(ArgsBase):
+    def __init__(self, x1, x2, r1, r2, a1, a2, steps):
+        ArgsBase.__init__(self, x1, x2, r1, r2, a1, a2, steps)
+
     def draw(self):
         x1, x2, r1, r2, a1, a2, steps = self.coords()
         if x1 > x2:
@@ -986,7 +1000,7 @@ class ArcX(CoordsBase):
         glVertex3f(x2, r1*s, r1*c)
         glVertex3f(x1, r1*s, r1*c)
         # other end
-        angle = a2 * (pi/180)        
+        angle = a2 * (pi/180)
         s = sin(angle)
         c = cos(angle)
         glNormal3f(0, c, -s)
@@ -1014,12 +1028,18 @@ class ArcX(CoordsBase):
         vol = area * height
         #print "Arc.volume = angle * area * height",vol, angle, area, height
         return vol
-        
 
+class HalArcX(ArcX):
+    def __init__(self,prefix, x1, x2, r1, r2, a1, a2, steps):
+        self.prefix = check_prefix(self, prefix)
+        ArcX.__init__(self, x1, x2, r1, r2, a1, a2, steps)
 
 
 # six coordinate version - specify each side of the box
-class Box(CoordsBase):
+class Box(ArgsBase):
+    def __init__(self, x1, y1, z1, x2, y2, z2):
+        ArgsBase.__init__(self, x1, y1, z1, x2, y2, z2)
+
     def draw(self):
         x1, y1, z1, x2, y2, z2 = self.coords()
         if x1 > x2:
@@ -1080,12 +1100,22 @@ class Box(CoordsBase):
         #print "Box.volume", vol
         return vol
 
+class HalBox(Box):
+    def __init__(self, prefix, x1, y1, z1, x2, y2, z2):
+        self.prefix = check_prefix(self, prefix)
+        Box.__init__(self, x1, y1, z1, x2, y2, z2)
 
 # specify the width in X and Y, and the height in Z
 # the box is centered on the origin
 class BoxCentered(Box):
     def __init__(self, xw, yw, zw):
         Box.__init__(self, -xw/2.0, -yw/2.0, -zw/2.0, xw/2.0, yw/2.0, zw/2.0)
+
+class HalBoxCentered(Box):
+    def __init__(self, prefix, xw, yw, zw):
+        self.prefix = check_prefix(self, prefix)
+        Box.__init__(self, -xw/2.0, -yw/2.0, -zw/2.0, xw/2.0, yw/2.0, zw/2.0)
+
 
 # specify the width in X and Y, and the height in Z
 # the box is centered in X and Y, and runs from Z=0 up
@@ -1094,18 +1124,26 @@ class BoxCenteredXY(Box):
     def __init__(self, xw, yw, zw):
         Box.__init__(self, -xw/2.0, -yw/2.0, 0, xw/2.0, yw/2.0, zw)
 
+class HalBoxCenteredXY(Box):
+    def __init__(self, prefix, xw, yw, zw):
+        self.prefix = check_prefix(self, prefix)
+        Box.__init__(self, -xw/2.0, -yw/2.0, 0, xw/2.0, yw/2.0, zw)
+
+
 # capture current transformation matrix
 # note that this transforms from the current coordinate system
 # to the viewport system, NOT to the world system
 class Capture(object):
     def __init__(self):
         self.t = []
+        self.tracked_parts = [self]
 
     def capture(self):
         self.t = glGetDoublev(GL_MODELVIEW_MATRIX)
-        
+
     def volume(self):
         return 0.0
+
 
 # function to invert a transform matrix
 # based on http://steve.hollasch.net/cgindex/math/matrix/afforthinv.c
@@ -1125,11 +1163,12 @@ def invert(src):
         inv[0][2],inv[2][0] = inv[2][0],inv[0][2]
         inv[1][2],inv[2][1] = inv[2][1],inv[1][2]
         # The inverse of the translation component is just the negation
-        # of the translation after dotting with the new upper3x3 rows. */        
+        # of the translation after dotting with the new upper3x3 rows. */
         inv[3][0] = -(src[3][0]*inv[0][0] + src[3][1]*inv[1][0] + src[3][2]*inv[2][0])
         inv[3][1] = -(src[3][0]*inv[0][1] + src[3][1]*inv[1][1] + src[3][2]*inv[2][1])
         inv[3][2] = -(src[3][0]*inv[0][2] + src[3][1]*inv[1][2] + src[3][2]*inv[2][2])
         return inv
+
 
 # head up display - draws a semi-transparent text box.
 class Hud(object):
@@ -1156,7 +1195,7 @@ class Hud(object):
 
         # legacy function, no longer supported, use add_txt() with a tag instead
         def clear(self):
-            print("vismach.py, clear() deprecated, use add_txt() with a tag instead ")
+            print("vismach.py, Hud.clear() deprecated, use add_txt() with a tag instead ")
 
         # legacy vismach models used this
         def show(self, string):
@@ -1165,11 +1204,13 @@ class Hud(object):
 
         # displays a string, optionally a tag or list of tags can be assigned
         def add_txt(self, string, tag=None):
-            self.hud_lines += [[str(string), None, tag]]
+            prefix=None
+            self.hud_lines += [[str(string), None, tag, prefix]]
 
-        # displays a formatted pin value (can be embedded in a string)
-        def add_pin(self, string, pin=None, tag=None):
-            self.hud_lines += [[str(string), pin, tag]]
+        # displays a formatted pin or status value (can be embedded in a string)
+        # defaults to a general hal pin for status use (prefix= <linuxcnc.stat instance>)
+        def add_pin(self, string, pin=None, tag=None, prefix=hal):
+            self.hud_lines += [[str(string), pin, tag, prefix]]
 
         # shows all lines with the specified tag if the pin value = val
         def show_tag_if_same(self, tag, pin, val=True):
@@ -1218,15 +1259,18 @@ class Hud(object):
                         tag = [tag]
                     if tag is not None:
                         show_list = show_list + tag
-                # build the
-                for c in self.hud_lines:
-                    if not isinstance(c[2], list):
-                        c[2] = [c[2]]
-                    if any(item in c[2] for item in show_list):
-                        if c[1] == None: # _txt
-                            messages += [c[0]]
-                        else: # _pin
-                            messages += [c[0].format(hal.get_value(c[1]))]
+                # create list of message lines to be shown
+                for hud_line in self.hud_lines:
+                    #print("++++",hud_line)
+                    [string, pin, tag, prefix] = hud_line
+                    if not isinstance(tag, list):
+                        tag = [tag]
+                    if any(item in tag for item in show_list):
+                        if pin == None: # text
+                            messages += [string]
+                        else : # pin or status
+                            value = get_pin_or_attribute_value(self, prefix, pin)
+                            messages += [string.format(value)]
                 drawtext = self.strs + messages
 
                 # draw head-up-display
@@ -1295,6 +1339,8 @@ class Hud(object):
                 glMatrixMode(GL_MODELVIEW)
 
 
+
+
 class O(rs274.OpenGLTk.Opengl):
     def __init__(self, *args, **kw):
         rs274.OpenGLTk.Opengl.__init__(self, *args, **kw)
@@ -1324,9 +1370,6 @@ class O(rs274.OpenGLTk.Opengl):
         glEnable(GL_DEPTH_TEST)
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
-  
-
-                
 
     def redraw(self, *args):
         if self.winfo_width() == 1: return
@@ -1376,8 +1419,8 @@ class O(rs274.OpenGLTk.Opengl):
 
         # back to world coords
         #glPopMatrix()
-        
-        
+
+
         # we can also draw in the work coord system
         glPushMatrix()
         # "work -> view -> world"
@@ -1390,7 +1433,7 @@ class O(rs274.OpenGLTk.Opengl):
 
         # just a test object, sitting on the table
         #gluCylinder(self.q2, 40, 20, 60, 32, 16)
-        
+
         #draw head up display
         if(hasattr(self.hud, "draw")):
                 self.hud.draw()
@@ -1417,20 +1460,12 @@ class O(rs274.OpenGLTk.Opengl):
     def plotclear(self):
         del self.plotdata[:self.plotlen]
 
-class Color(Collection):
-    def __init__(self, color, parts):
-        self.color = color
-        Collection.__init__(self, parts)
-
-    def apply(self):
-        glPushAttrib(GL_LIGHTING_BIT)
-        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, self.color)
-
-    def unapply(self):
-        glPopAttrib()
 
 class AsciiSTL:
     def __init__(self, filename=None, data=None):
+        self.load(filename, data)
+
+    def load(self, filename, data):
         if data is None:
             data = open(filename, "r")
         elif isinstance(data, str):
@@ -1443,7 +1478,7 @@ class AsciiSTL:
             if line.find("normal") != -1:
                 line = line.split()
                 x, y, z = list(map(float, line[-3:]))
-                n = [x,y,z] 
+                n = [x,y,z]
             elif line.find("vertex") != -1:
                 line = line.split()
                 x, y, z = list(map(float, line[-3:]))
@@ -1478,13 +1513,50 @@ class AsciiSTL:
             del self.d
         glCallList(self.list)
 
+class HalAsciiSTL(AsciiSTL, ArgsBase):
+    def __init__(self, prefix, filename=None, path='', data=None):
+        self.explicit_path = None
+        if os.path.isfile(path + filename):
+            self.explicit_path = path + filename
+            self.load(self.explicit_path, data)
+        else:
+            # No explicit filepath has been passed so we'll need to query for the value
+            self.prefix = check_prefix(self, prefix)
+            self.old_filepath = None
+            self.error_path = None
+            ArgsBase.__init__(self, filename, path, data)
+
+    def draw(self):
+        if self.explicit_path is not None:
+            AsciiSTL.draw(self)
+        else:
+            filename, path, data = self.coords()
+            # filename is an integer here as we get it from a halpin or a status attribute
+            self.filepath = path + str(filename) + '.stl'
+            if self.filepath != self.old_filepath:
+                self.old_filepath = self.filepath
+                if not os.path.isfile(self.filepath):
+                    # If the file is not there we want to print a message, but only once
+                    if self.filepath != self.error_path:
+                        print('Vismach Error: Unable to read file ', filepath)
+                    self.error_path = filepath
+                else:
+                    self.load(filepath, data)
+                    self.error_path = None
+            if self.error_path is None:
+                AsciiSTL.draw(self)
+
+
+
 class AsciiOBJ:
     def __init__(self, filename=None, data=None):
+        self.load(filename, data)
+
+    def load(self, filename, data):
         if data is None:
             data = open(filename, "r")
         elif isinstance(data, str):
             data = data.split("\n")
-
         self.v = v = []
         self.vn = vn = []
         self.f = f = []
@@ -1496,13 +1568,7 @@ class AsciiOBJ:
                 v.append([float(w) for w in line.split()[1:]])
             elif line.startswith("f"):
                 f.append(self.parse_face(line))
-
-#        print v[:5]
-#        print vn[:5]
-#        print f[:5]
-
         self.list = None
-
 
     def parse_int(self, i):
         if i == '': return None
@@ -1536,11 +1602,42 @@ class AsciiOBJ:
         glCallList(self.list)
 
 
-old_plotclear = False
+class HalAsciiOBJ(AsciiOBJ, ArgsBase):
+    def __init__(self, prefix, filename=None, path='', data=None):
+        self.explicit_path = None
+        if os.path.isfile(path + filename):
+            self.explicit_path = path + filename
+            self.load(self.explicit_path, data)
+        else:
+            # No explicit filepath has been passed so we'll need to query for the value
+            self.prefix = check_prefix(self, prefix)
+            self.old_filepath = None
+            self.error_path = None
+            ArgsBase.__init__(self, filename, path, data)
+
+    def draw(self):
+        if self.explicit_path is not None:
+            AsciiOBJ.draw(self)
+        else:
+            filename, path, data = self.coords()
+            # filename is an integer here as we get it from a halpin or a status attribute
+            self.filepath = path + str(filename) + '.stl'
+            if self.filepath != self.old_filepath:
+                self.old_filepath = self.filepath
+                if not os.path.isfile(self.filepath):
+                    # If the file is not there we want to print a message, but only once
+                    if self.filepath != self.error_path:
+                        print('Vismach Error: Unable to read file ', filepath)
+                    self.error_path = filepath
+                else:
+                    self.load(filepath, data)
+                    self.error_path = None
+            if self.error_path is None:
+                AsciiOBJ.draw(self)
+
 
 def main(model, tool, work, size=10, hud=0, rotation_vectors=None, lat=0, lon=0):
     app = tkinter.Tk()
-
     t = O(app, double=1, depth=1)
     # set which axes to rotate around
     if rotation_vectors: t.rotation_vectors = rotation_vectors
@@ -1562,7 +1659,7 @@ def main(model, tool, work, size=10, hud=0, rotation_vectors=None, lat=0, lon=0)
             t.hud = HUD
 
     t.hud.app = t #HUD needs to know where to draw
-        
+
     # need to capture the world coordinate system
     world = Capture()
 
